@@ -1,9 +1,9 @@
-// Token Radar radar-2 dashboard, rewritten. It reads window.RADAR (written
+// Token Radar radar-3 dashboard, rewritten. It reads window.RADAR (written
 // beside dashboard/ by main.ts) and renders the ranked board, a filterable
 // table, and a per-protocol detail drawer carrying the model's own inputs
 // plus the protocol's farm plan. No network: every byte shown is in data.js.
 // The page recomputes each row from the snapshot figures with the same
-// radar-2 arithmetic main.ts uses, so the page's code and the board's data
+// radar-3 arithmetic main.ts uses, so the page's code and the board's data
 // are visibly the same model — the detail drawer says so out loud, showing
 // the recomputed figure next to the board's figure.
 (function () {
@@ -53,8 +53,8 @@
     return Math.max(0, Math.round(days)) + 'd';
   }
 
-  // radar-2, the same arithmetic lib/model.ts runs: base 0.30 x TVL, growth
-  // clamped to -50..150 at weight 0.75, maturity 0.55 + min(age, 1460) / 1460
+  // radar-3, the same arithmetic lib/model.ts runs: base 2279.5453 x TVL^0.5,
+  // growth clamped to -50..150 at weight 0.75, maturity 0.55 + min(age, 1460) / 1460
   // x 0.45 (unknown age 365), breadth 1 + min(chains - 1, 4) x 0.03.
   function recompute(row, model) {
     var weekly = row.change_7d === null || row.change_7d === undefined ? 0 : row.change_7d;
@@ -64,7 +64,7 @@
     var maturity = model.maturity_floor + (Math.min(Math.max(age, 0), model.maturity_days) / model.maturity_days) * model.maturity_range;
     var extra = Math.min(Math.max((row.chains || []).length - 1, 0), model.breadth_cap_chains);
     var breadth = 1 + extra * model.breadth_step;
-    return Math.max(1, Math.round(row.tvl_usd * model.base_multiple * growthMult * maturity * breadth));
+    return Math.max(1, Math.round(model.power_scale * Math.pow(row.tvl_usd, model.power_exponent) * growthMult * maturity * breadth));
   }
 
   // Tiny element builder. Props: cls for className, txt for textContent,
@@ -423,7 +423,7 @@
   // what the board covers. The numbers come from the data, not the text.
   function modelExplainer() {
     var m = DATA.model;
-    var formula = 'implied = round( tvl_usd x ' + m.base_multiple +
+    var formula = 'implied = round( ' + m.power_scale + ' x tvl_usd^' + m.power_exponent +
       ' x (1 + clamp(change_7d, ' + m.growth_floor + ', ' + m.growth_cap + ') / 100 x ' + m.growth_weight +
       ') x (' + m.maturity_floor + ' + min(age_days, ' + m.maturity_days + ') / ' + m.maturity_days + ' x ' + m.maturity_range +
       ') x (1 + min(chains - 1, ' + m.breadth_cap_chains + ') x ' + m.breadth_step + ') )';
@@ -432,7 +432,7 @@
       h('p', { cls: 'sub', txt: 'Every row is scored by one function of the snapshot figures. No protocol name is special-cased, and no row is hand-picked.' }),
       h('div', { cls: 'formula' }, formula),
       h('dl', null,
-        h('div', null, h('dt', { txt: 'Size — TVL x 0.30' }), h('dd', { txt: 'TVL is the anchor: a launch scales with the value already locked in the protocol.' })),
+        h('div', null, h('dt', { txt: 'Size — power law on TVL' }), h('dd', { txt: 'TVL is the anchor, but it scales sublinearly: implied value grows with the square root of TVL, so the biggest protocols are worth proportionally less per dollar locked.' })),
         h('div', null, h('dt', { txt: 'Momentum — growth x 0.75' }), h('dd', { txt: 'Seven-day TVL change, clamped to -50%..+150%. Fast-growing protocols are worth more than shrinking ones of the same size.' })),
         h('div', null, h('dt', { txt: 'Maturity — age up to 4 years' }), h('dd', { txt: 'Days since first listed with no token. Older no-token protocols have survived longer; unknown age counts as ' + m.unknown_age_days + ' days.' })),
         h('div', null, h('dt', { txt: 'Breadth — +3% per extra chain' }), h('dd', { txt: 'Each chain beyond the first, up to four, adds 3%: a wider distribution surface for a launch, never the driver.' }))
@@ -466,7 +466,7 @@
       h('h3', { txt: 'Implied value' }),
       h('div', { cls: 'equation' },
         h('div', null, h('span', { txt: 'TVL' }), h('b', { cls: 'num', txt: money(row.tvl_usd) })),
-        h('div', null, h('span', { txt: 'Base (TVL x ' + DATA.model.base_multiple + ')' }), h('b', { cls: 'num', txt: money(row.tvl_usd * DATA.model.base_multiple) })),
+        h('div', null, h('span', { txt: 'Base (' + DATA.model.power_scale + ' x TVL^' + DATA.model.power_exponent + ')' }), h('b', { cls: 'num', txt: money(DATA.model.power_scale * Math.pow(row.tvl_usd, DATA.model.power_exponent)) })),
         h('div', null, h('span', { txt: 'Seven-day growth' }), h('b', { cls: 'num', txt: pct(row.change_7d) })),
         h('div', null, h('span', { txt: 'Age with no token' }), h('b', { cls: 'num', txt: ageLabel(row.age_days) + (row.age_days === null ? ' (assumed ' + DATA.model.unknown_age_days + 'd)' : '') })),
         h('div', null, h('span', { txt: 'Growth multiplier' }), h('b', { cls: 'num', txt: String(row.growth_multiplier) })),

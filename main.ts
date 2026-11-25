@@ -1,11 +1,11 @@
-// Token Radar radar-2: the entry point (Node 22, standard library only).
-// Built for @titit-oren — radar-2 scores the full 289-row rankable universe.
+// Token Radar radar-3: the entry point (Node 22, standard library only).
+// Built for @titit-oren — radar-3 scores the rankable universe (198 rows on the sealed snapshot).
 //
 // What this program does, in order:
 //   1. Reads the sealed snapshot from /input/snapshot.json (or --input
 //      <file|dir>) and scores every rankable pre-token protocol with the
-//      radar-2 model in lib/model.ts — the whole watchlist plus every
-//      pre-token protocol below the floor, 289 rows in all.
+//      radar-3 model in lib/model.ts — the whole watchlist plus every
+//      eligible pre-token protocol below the floor, 198 rows in all.
 //   2. Refuses to continue when the board fails the gate's own checks.
 //   3. Writes the ranked board to /output/board.json and the dashboard's
 //      dataset to /output/data.js, from the same scored board.
@@ -102,6 +102,6 @@ writeFileSync(
 );
 
 process.stdout.write(
-  `token radar radar-2: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
+  `token radar radar-3: ${snapshot.protocols.length} protocols, ${snapshot.watchlist.length} on the watchlist, ${board.length} rows scored (${radar.early_size} early, ${radar.live_size} live set aside)\n` +
     `token radar: wrote ${join(outDir, 'board.json')}, ${join(outDir, 'data.js')}, ${join(outDir, 'dashboard')} (3 files), ${join(outDir, 'screenshots')} (${shots.length} images) and ${join(outDir, 'dossier.json')}\n`,
 );
