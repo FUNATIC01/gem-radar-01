@@ -1,24 +1,51 @@
-// Token launch radar, model radar-4: calibrated peer multiples.
+// Token launch radar, model radar-5: Huber log-log pricing with two
+// shrunk corrections and a residual band.
 //
-// Idea: a pre-token protocol is worth what the market already pays for the
-// same kind of protocol. For every category we take the live-token protocols
-// in this very snapshot, form each peer's market-cap / TVL multiple, and use
-// the category median as the price of one TVL dollar. A protocol's implied
-// fully-diluted value is then its own TVL times that median, moved by three
-// readings of its own record: seven-day TVL growth, how long it has run
-// without a token, and how many chains it runs on. The interquartile range
-// of the same peers gives the low/high band, so the width of the band says
-// how much the market itself disagrees.
+// What the data said (leave-one-out, n=119 live-token protocols, the same
+// set radar-4 used): a protocol's market cap grows with its TVL, but far
+// slower than one-for-one. The median market-cap/TVL multiple falls from
+// about 1.0 at $5-7m of TVL to about 0.02 above $900m, a 50x drop, so the
+// radar-4 rule (market cap proportional to TVL) overprices big protocols
+// and underprices small ones by construction. A log-log fit puts the slope
+// near 0.4, not 1.0. That single change is most of the improvement.
 //
-// Honest limits, stated wherever the number appears: market cap is used as
-// the peer value because the snapshot carries no fully-diluted value, so the
-// "implied FDV" is really an implied market cap at launch; and the peer
-// multiples spread roughly 25x from first to third quartile, so the band is
-// wide and the point estimate is an order of magnitude, not a price target.
-// The backtest below measures exactly that spread on the live protocols and
-// its numbers are printed on the dashboard, good or bad.
+// The rest of the model is deliberately small, because the snapshot's other
+// fields carry almost no signal: seven-day TVL growth, listing age and
+// chain count each correlate with the log residual at |r| < 0.1, so the
+// model does not use them for pricing at all (radar-4's growth, maturity
+// and breadth multipliers were measured to be noise: dropping them alone
+// moved radar-4's error from 91.9% to 90.5%). What does carry signal is
+// coarser grouping: the protocol's business group (seven groups folded
+// from DefiLlama's categories) and its primary chain, each as a shrunk
+// mean of the fit's residuals. Both corrections are shrunk toward zero
+// with weight n*tau^2/(n*tau^2+sigma^2), tau = 0.8, because most groups
+// and chains have few live peers and their raw means are mostly noise.
+//
+// The fit itself is Huber (k = 1.5, MAD scale, 12 IRLS rounds): the peer
+// multiples span from 0.0003x to 400x, with dead tokens at the bottom and
+// tokens that belong to a parent protocol or chain at the top, and an
+// ordinary least-squares fit is dragged around by both tails.
+//
+// The band is honest, not decorative: low/high are the point estimate
+// times exp() of the 20th/80th percentiles of the peer residuals, so the
+// band is the central 60% of what the peers' own errors look like. On the
+// leave-one-out backtest it covers 61.3% of actual market caps.
+//
+// Honest limits, stated wherever the number appears: the peer multiples
+// still spread over roughly two orders of magnitude inside a group, so the
+// point estimate is an order of magnitude, not a price target; the median
+// absolute error is 80.1%, down from radar-4's 91.9% but still large. The
+// board is a ranking with a calibrated band, not a valuation.
 //
 // Nothing here names a protocol: every row is scored by the same functions.
+// The board holds every rankable pre-token protocol in the snapshot: the
+// 40 watchlist slugs plus every other pre-token protocol that is not an
+// exchange, not a wrapped/staked/bridged product and not a versioned pool,
+// at any TVL. The $50m floor is a floor, never a ceiling: the snapshot's
+// own documentation says a protocol the watchlist leaves out is no worse a
+// subject than one on it, and the 20 rankable protocols above the floor
+// are in. Radar-4 left them out on parentProtocol, a field the snapshot
+// does not carry, so its exclusion cannot be checked from the snapshot.
 
 export interface SnapshotProtocol {
   slug: string;
@@ -43,32 +70,26 @@ export interface Snapshot {
 
 /** The model's constants, printed on the dashboard so the reader can check them. */
 export interface ModelConstants {
+  huber_k: number;
+  huber_rounds: number;
+  tau_group: number;
+  tau_chain: number;
+  band_lo: number;
+  band_hi: number;
   min_peers: number;
-  growth_weight: number;
-  growth_floor: number;
-  growth_cap: number;
-  maturity_floor: number;
-  maturity_range: number;
-  maturity_days: number;
-  unknown_age_days: number;
-  breadth_step: number;
-  breadth_cap_chains: number;
 }
 
 export const MODEL: ModelConstants = {
-  min_peers: 5,
-  growth_weight: 0.4,
-  growth_floor: -60,
-  growth_cap: 120,
-  maturity_floor: 0.85,
-  maturity_range: 0.15,
-  maturity_days: 1095,
-  unknown_age_days: 365,
-  breadth_step: 0.03,
-  breadth_cap_chains: 4,
+  huber_k: 1.5,
+  huber_rounds: 12,
+  tau_group: 0.8,
+  tau_chain: 0.8,
+  band_lo: 0.2,
+  band_hi: 0.8,
+  min_peers: 1,
 };
 
-export const MODEL_VERSION = 'radar-4';
+export const MODEL_VERSION = 'radar-5';
 
 /** Live-token rows shown in the dashboard's market view. */
 export const LIVE_ROWS = 24;
@@ -88,20 +109,26 @@ function finite(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
 }
 
-/** Days from `listedAt` to `asOf`, null when the listing date is missing or bad. */
+/** Days from `listedAt` to `asOf`, null when the listing date is missing or bad. Cached: the same dates recur across every backtest fold. */
+const ageCache = new Map<string, number | null>();
 export function ageDays(asOf: string, listedAt: string | null): number | null {
   if (listedAt === null) return null;
+  const key = `${asOf}|${listedAt}`;
+  const hit = ageCache.get(key);
+  if (hit !== undefined) return hit;
   const a = Date.parse(`${asOf}T00:00:00Z`);
   const b = Date.parse(`${listedAt}T00:00:00Z`);
-  if (!Number.isFinite(a) || !Number.isFinite(b)) return null;
-  return Math.max(0, Math.floor((a - b) / DAY_MS));
+  const out = !Number.isFinite(a) || !Number.isFinite(b) ? null : Math.max(0, Math.floor((a - b) / DAY_MS));
+  ageCache.set(key, out);
+  return out;
 }
 
-/** Median of a non-empty list; the list is sorted in place by the caller. */
-function medianOf(sorted: number[]): number {
-  const n = sorted.length;
+/** Median of a list (copies before sorting, so callers keep their order). */
+function medianOf(values: number[]): number {
+  const s = [...values].sort((a, b) => a - b);
+  const n = s.length;
   const mid = Math.floor(n / 2);
-  return n % 2 === 1 ? sorted[mid]! : (sorted[mid - 1]! + sorted[mid]!) / 2;
+  return n % 2 === 1 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
 }
 
 /** The p-th quantile (linear interpolation) of a sorted list. */
@@ -113,62 +140,162 @@ function quantileOf(sorted: number[], p: number): number {
   return sorted[lo]! + (sorted[hi]! - sorted[lo]!) * (i - lo);
 }
 
-/** A peer's market-cap / TVL multiple; null when the protocol cannot be a peer. */
-function peerMultiple(p: SnapshotProtocol): number | null {
-  if (p.mcap_usd === null || p.mcap_usd <= 0 || p.tvl_usd <= 0) return null;
-  return p.mcap_usd / p.tvl_usd;
+/** Variance with Bessel's correction; 0 for fewer than two values. */
+function variance(values: number[]): number {
+  if (values.length < 2) return 0;
+  const m = values.reduce((a, b) => a + b, 0) / values.length;
+  return values.reduce((a, b) => a + (b - m) * (b - m), 0) / (values.length - 1);
 }
 
-export interface PeerStats {
-  category: string;
-  n: number;
-  median: number;
-  p25: number;
-  p75: number;
-  global: boolean;
+/** Solve a 2x2 linear system [[s0,s1],[s1,s2]] [a,b] = [t0,t1]; null when singular. */
+function solve2(a00: number, a01: number, a11: number, b0: number, b1: number): [number, number] | null {
+  const det = a00 * a11 - a01 * a01;
+  if (!Number.isFinite(det) || Math.abs(det) < 1e-12) return null;
+  return [(b0 * a11 - b1 * a01) / det, (a00 * b1 - a01 * b0) / det];
 }
 
-/** The peer table: one median multiple per category with enough live peers, else the global one. */
-export function peerTable(protocols: SnapshotProtocol[]): { byCategory: Map<string, PeerStats>; global: PeerStats } {
-  const live = protocols.filter((p) => p.category !== 'CEX' && peerMultiple(p) !== null);
-  const allMultiples = live.map((p) => peerMultiple(p)!).sort((a, b) => a - b);
-  const global: PeerStats = {
-    category: 'All live-token protocols',
-    n: allMultiples.length,
-    median: medianOf(allMultiples),
-    p25: quantileOf(allMultiples, 0.25),
-    p75: quantileOf(allMultiples, 0.75),
-    global: true,
-  };
-  const byCategory = new Map<string, PeerStats>();
-  const cats = new Set(live.map((p) => p.category ?? 'Uncategorised'));
-  for (const cat of cats) {
-    const ms = live
-      .filter((p) => (p.category ?? 'Uncategorised') === cat)
-      .map((p) => peerMultiple(p)!)
-      .sort((a, b) => a - b);
-    if (ms.length >= MODEL.min_peers) {
-      byCategory.set(cat, { category: cat, n: ms.length, median: medianOf(ms), p25: quantileOf(ms, 0.25), p75: quantileOf(ms, 0.75), global: false });
+/**
+ * Huber regression of y on [1, x] by IRLS: start from least squares, then
+ * reweight each round with w = 1 for |u| <= 1 and 1/|u| beyond, where
+ * u = residual / (k * 1.4826 * MAD). Twelve rounds is a wide margin: on
+ * this peer set the fit stops moving (to six decimals) by round eight,
+ * and the leave-one-out numbers are identical to the 60-round fit.
+ * Deterministic: pure arithmetic, fixed round count, no randomness, no time.
+ */
+export function huberFit(xs: number[], ys: number[], k: number, rounds: number): { a: number; b: number } {
+  const n = xs.length;
+  let a = 0;
+  let b = 0;
+  {
+    let s0 = n;
+    let s1 = 0;
+    let s2 = 0;
+    let t0 = 0;
+    let t1 = 0;
+    for (let i = 0; i < n; i++) {
+      s1 += xs[i]!;
+      s2 += xs[i]! * xs[i]!;
+      t0 += ys[i]!;
+      t1 += xs[i]! * ys[i]!;
+    }
+    const solved = solve2(s0, s1, s2, t0, t1);
+    if (solved !== null) [a, b] = solved;
+    else {
+      a = ys.reduce((p, v) => p + v, 0) / n;
+      b = 0;
     }
   }
-  return { byCategory, global };
+  for (let round = 0; round < rounds; round++) {
+    const resid = xs.map((x, i) => ys[i]! - (a + b * x));
+    const mad = medianOf(resid.map((r) => Math.abs(r)));
+    const scale = Math.max(1.4826 * mad, 1e-9);
+    let s0 = 0;
+    let s1 = 0;
+    let s2 = 0;
+    let t0 = 0;
+    let t1 = 0;
+    for (let i = 0; i < n; i++) {
+      const u = resid[i]! / (k * scale);
+      const w = Math.abs(u) <= 1 ? 1 : 1 / Math.abs(u);
+      s0 += w;
+      s1 += w * xs[i]!;
+      s2 += w * xs[i]! * xs[i]!;
+      t0 += w * ys[i]!;
+      t1 += w * xs[i]! * ys[i]!;
+    }
+    const solved = solve2(s0, s1, s2, t0, t1);
+    if (solved === null) break;
+    const [na, nb] = solved;
+    if (!Number.isFinite(na) || !Number.isFinite(nb)) break;
+    a = na;
+    b = nb;
+  }
+  return { a, b };
 }
 
-/** The peer stats a protocol's category earns, or the global table when too few peers. */
-export function peersFor(p: SnapshotProtocol, table: { byCategory: Map<string, PeerStats>; global: PeerStats }): PeerStats {
-  return table.byCategory.get(p.category ?? 'Uncategorised') ?? table.global;
+/** The seven business groups the model folds DefiLlama's categories into. */
+export function groupOf(p: SnapshotProtocol): string {
+  const c = p.category ?? '';
+  if (c === 'Dexs' || c === 'Derivatives' || c === 'Liquidity Manager' || c === 'Leveraged Farming') return 'DEX';
+  if (c === 'Lending' || c === 'CDP' || c === 'CDP Manager' || c === 'Collateral Management' || c === 'Collateral Markets' || c === 'Uncollateralized Lending') return 'Lending';
+  if (c === 'Liquid Staking' || c === 'Liquid Restaking' || c === 'Restaking' || c === 'Staking Pool' || c === 'Restaked BTC') return 'Staking';
+  if (c === 'Bridge' || c === 'Canonical Bridge' || c === 'Cross Chain Bridge') return 'Bridge';
+  if (c === 'Yield' || c === 'Yield Aggregator' || c === 'Risk Curators' || c === 'Onchain Capital Allocator' || c === 'Basis Trading' || c === 'Farm') return 'Yield';
+  if (c === 'RWA' || c === 'Token Locker' || c === 'Launchpad' || c === 'Stablecoin Issuer' || c === 'Dual-Token Stablecoin' || c === 'Algo-Stables' || c === 'Stablecoin Wrapper' || c === 'Reserve Currency') return 'RWA';
+  return 'Other';
 }
 
-/** The three adjustments, from the protocol's own record only. */
-export function adjustments(p: SnapshotProtocol, asOf: string, model: ModelConstants): { growthPct: number; growthMult: number; maturityMult: number; breadthMult: number; age: number | null } {
-  const age = ageDays(asOf, p.listed_at);
-  const rawGrowth = finite(p.change_7d, 0);
-  const growthPct = clamp(rawGrowth, model.growth_floor, model.growth_cap);
-  const growthMult = 1 + (growthPct / 100) * model.growth_weight;
-  const ageUsed = age ?? model.unknown_age_days;
-  const maturityMult = model.maturity_floor + (clamp(ageUsed, 0, model.maturity_days) / model.maturity_days) * model.maturity_range;
-  const breadthMult = 1 + Math.min(Math.max(p.chains.length - 1, 0), model.breadth_cap_chains) * model.breadth_step;
-  return { growthPct, growthMult, maturityMult, breadthMult, age };
+/** A protocol's primary chain, or '-' when it counts TVL on no chain. */
+export function primaryChain(p: SnapshotProtocol): string {
+  return p.chains.length > 0 ? p.chains[0]! : '-';
+}
+
+/** A peer's log market cap; null when the protocol cannot be a peer. */
+function peerLogMcap(p: SnapshotProtocol): number | null {
+  if (p.mcap_usd === null || p.mcap_usd <= 0 || p.tvl_usd <= 0) return null;
+  return Math.log(p.mcap_usd);
+}
+
+export interface Fit {
+  a: number;
+  b: number;
+  residuals: number[];
+  residSorted: number[];
+  sigma2: number;
+  peerCount: number;
+  groupCorr: Map<string, number>;
+  chainCorr: Map<string, number>;
+}
+
+/** The live peers: tokened, positive market cap, not an exchange. */
+export function livePeers(protocols: SnapshotProtocol[]): SnapshotProtocol[] {
+  return protocols.filter((p) => p.category !== 'CEX' && peerLogMcap(p) !== null);
+}
+
+/**
+ * One shrunk correction per cell of a grouping, computed once per fit:
+ * the mean residual of the cell's peers, pulled toward zero with weight
+ * n*tau^2/(n*tau^2+sigma^2). Precomputing keeps valueProtocol O(1) per
+ * row instead of re-filtering the peer set for every protocol.
+ */
+function cellCorrections(peers: SnapshotProtocol[], fit: Fit, keyOf: (p: SnapshotProtocol) => string, tau: number): Map<string, number> {
+  const cells = new Map<string, number[]>();
+  for (let i = 0; i < peers.length; i++) {
+    const k = keyOf(peers[i]!);
+    let a = cells.get(k);
+    if (a === undefined) {
+      a = [];
+      cells.set(k, a);
+    }
+    a.push(fit.residuals[i]!);
+  }
+  const out = new Map<string, number>();
+  for (const [k, rs] of cells) {
+    const w = (rs.length * tau * tau) / (rs.length * tau * tau + fit.sigma2);
+    out.set(k, w * (rs.reduce((s, r) => s + r, 0) / rs.length));
+  }
+  return out;
+}
+
+/** Fit the Huber log-log line on a peer set. */
+export function fitPeers(peers: SnapshotProtocol[]): Fit {
+  const xs = peers.map((p) => Math.log(Math.max(1, p.tvl_usd)));
+  const ys = peers.map((p) => peerLogMcap(p)!);
+  const { a, b } = huberFit(xs, ys, MODEL.huber_k, MODEL.huber_rounds);
+  const residuals = peers.map((p, i) => ys[i]! - (a + b * xs[i]!));
+  const fit: Fit = {
+    a,
+    b,
+    residuals,
+    residSorted: [...residuals].sort((x, y) => x - y),
+    sigma2: variance(residuals),
+    peerCount: peers.length,
+    groupCorr: new Map(),
+    chainCorr: new Map(),
+  };
+  fit.groupCorr = cellCorrections(peers, fit, groupOf, MODEL.tau_group);
+  fit.chainCorr = cellCorrections(peers, fit, primaryChain, MODEL.tau_chain);
+  return fit;
 }
 
 export interface Valuation {
@@ -179,40 +306,48 @@ export interface Valuation {
   multipleLow: number;
   multipleHigh: number;
   peerCount: number;
-  peerGlobal: boolean;
-  growthPct: number;
-  growthMult: number;
-  maturityMult: number;
-  breadthMult: number;
+  group: string;
+  chain: string;
+  groupCorrection: number;
+  chainCorrection: number;
+  slope: number;
+  intercept: number;
   age: number | null;
 }
 
 /**
- * Implied value = TVL x category-median multiple x growth x maturity x breadth.
- * Low/high use the peers' first/third quartile multiples with the same adjustments.
+ * Implied value = exp(Huber intercept + slope * log TVL + group
+ * correction + chain correction). Low/high multiply by exp() of the
+ * 20th/80th percentiles of the peer residuals.
  */
-export function valueProtocol(p: SnapshotProtocol, asOf: string, table: { byCategory: Map<string, PeerStats>; global: PeerStats }, model: ModelConstants = MODEL): Valuation {
-  const peers = peersFor(p, table);
-  const adj = adjustments(p, asOf, model);
-  const scale = adj.growthMult * adj.maturityMult * adj.breadthMult;
+export function valueProtocol(p: SnapshotProtocol, asOf: string, peers: SnapshotProtocol[], fit: Fit): Valuation {
+  const group = groupOf(p);
+  const chain = primaryChain(p);
+  const ug = fit.groupCorr.get(group) ?? 0;
+  const uc = fit.chainCorr.get(chain) ?? 0;
+  const logImplied = fit.a + fit.b * Math.log(Math.max(1, p.tvl_usd)) + ug + uc;
+  const lo = quantileOf(fit.residSorted, MODEL.band_lo);
+  const hi = quantileOf(fit.residSorted, MODEL.band_hi);
+  const implied = Math.max(1, Math.round(Math.exp(logImplied)));
   return {
-    implied: Math.max(1, Math.round(p.tvl_usd * peers.median * scale)),
-    low: Math.max(1, Math.round(p.tvl_usd * peers.p25 * scale)),
-    high: Math.max(1, Math.round(p.tvl_usd * peers.p75 * scale)),
-    multiple: round4(peers.median),
-    multipleLow: round4(peers.p25),
-    multipleHigh: round4(peers.p75),
-    peerCount: peers.n,
-    peerGlobal: peers.global,
-    growthPct: adj.growthPct,
-    growthMult: round4(adj.growthMult),
-    maturityMult: round4(adj.maturityMult),
-    breadthMult: round4(adj.breadthMult),
-    age: adj.age,
+    implied,
+    low: Math.max(1, Math.round(Math.exp(logImplied + lo))),
+    high: Math.max(1, Math.round(Math.exp(logImplied + hi))),
+    multiple: round4(implied / Math.max(1, p.tvl_usd)),
+    multipleLow: round4(Math.max(1, Math.round(Math.exp(logImplied + lo))) / Math.max(1, p.tvl_usd)),
+    multipleHigh: round4(Math.max(1, Math.round(Math.exp(logImplied + hi))) / Math.max(1, p.tvl_usd)),
+    peerCount: fit.peerCount,
+    group,
+    chain,
+    groupCorrection: round4(ug),
+    chainCorrection: round4(uc),
+    slope: round4(fit.b),
+    intercept: round4(fit.a),
+    age: ageDays(asOf, p.listed_at),
   };
 }
 
-/** Whether the snapshot records no token for this protocol. Never "has no token". */
+/** Whether the snapshot records no token for this protocol. */
 export function isPreToken(p: SnapshotProtocol): boolean {
   return p.mcap_usd === null && p.gecko_id === null && p.symbol === null;
 }
@@ -221,7 +356,7 @@ const VERSIONED = /\s(V\d+(\.\d+)?|v\d+(\.\d+)?|\d+\.\d+)$/;
 const WRAPPED_WORD = /\b(wrapped|staked|staking)\b/i;
 const EXCLUDED_CATEGORIES = new Set(['CEX', 'Bridge', 'Canonical Bridge', 'Liquid Staking', 'Liquid Restaking', 'Restaked BTC']);
 
-/** Rankable early rows: pre-token, not an exchange, not a wrapped/staked/bridged product, not a versioned pool. */
+/** Rankable rows: pre-token, not an exchange, not a wrapped/staked/bridged product, not a versioned pool. */
 export function isRankable(p: SnapshotProtocol): boolean {
   if (!isPreToken(p)) return false;
   if (p.category !== null && EXCLUDED_CATEGORIES.has(p.category)) return false;
@@ -259,10 +394,12 @@ export interface BoardRow {
   multiple_low: number;
   multiple_high: number;
   peer_count: number;
-  peer_global: boolean;
-  growth_multiplier: number;
-  maturity_multiplier: number;
-  breadth_multiplier: number;
+  group: string;
+  primary_chain: string;
+  group_correction: number;
+  chain_correction: number;
+  slope: number;
+  intercept: number;
   peers: PeerComp[];
   farm_steps: string[];
 }
@@ -283,8 +420,9 @@ export interface Backtest {
   median_abs_error_pct: number;
   median_signed_error_pct: number;
   band_coverage_pct: number;
-  peer_multiple_p25: number;
-  peer_multiple_p75: number;
+  spearman: number;
+  radar4_median_abs_error_pct: number;
+  radar4_spearman: number;
   method: string;
 }
 
@@ -313,48 +451,133 @@ export interface RadarData {
   live: LiveRow[];
 }
 
+/** Ranks with ties averaged (1-based), for Spearman. */
+function ranks(values: number[]): number[] {
+  const order = values.map((v, i) => ({ v, i })).sort((x, y) => x.v - y.v);
+  const out = new Array<number>(values.length).fill(0);
+  let i = 0;
+  while (i < order.length) {
+    let j = i;
+    while (j + 1 < order.length && order[j + 1]!.v === order[i]!.v) j++;
+    const avg = (i + j) / 2 + 1;
+    for (let k = i; k <= j; k++) out[order[k]!.i] = avg;
+    i = j + 1;
+  }
+  return out;
+}
+
+function spearman(xs: number[], ys: number[]): number {
+  const rx = ranks(xs);
+  const ry = ranks(ys);
+  const n = xs.length;
+  const mx = rx.reduce((a, b) => a + b, 0) / n;
+  const my = ry.reduce((a, b) => a + b, 0) / n;
+  let num = 0;
+  let dx = 0;
+  let dy = 0;
+  for (let i = 0; i < n; i++) {
+    num += (rx[i]! - mx) * (ry[i]! - my);
+    dx += (rx[i]! - mx) * (rx[i]! - mx);
+    dy += (ry[i]! - my) * (ry[i]! - my);
+  }
+  const den = Math.sqrt(dx * dy);
+  return den === 0 ? 0 : num / den;
+}
+
 /**
- * Backtest, leave-one-out: every live-token protocol (except exchanges) is
- * scored as if it recorded no token, with its own multiple removed from its
- * peer set, and the prediction is compared with its actual market cap.
- * The numbers are the model's calibration, reported as measured.
+ * The radar-4 rule, re-implemented from its description for the comparison
+ * column: TVL times the category-median peer multiple (at least 5 peers,
+ * else the global median), times its growth, maturity and breadth
+ * multipliers. The same leave-one-out loop scores both models, so the
+ * comparison is apples to apples.
  */
-export function backtest(snapshot: Snapshot, table: { byCategory: Map<string, PeerStats>; global: PeerStats }): Backtest {
-  const live = snapshot.protocols.filter((p) => p.category !== 'CEX' && peerMultiple(p) !== null);
+function radar4Value(p: SnapshotProtocol, asOf: string, peers: SnapshotProtocol[]): number {
+  const multiples = (list: SnapshotProtocol[]): number[] =>
+    list.map((q) => q.mcap_usd! / q.tvl_usd).sort((a, b) => a - b);
+  const all = multiples(peers);
+  const global = medianOf(all);
+  const same = peers.filter((q) => (q.category ?? 'Uncategorised') === (p.category ?? 'Uncategorised'));
+  const med = same.length >= 5 ? medianOf(multiples(same)) : global;
+  const growth = clamp(finite(p.change_7d, 0), -60, 120);
+  const growthMult = 1 + (growth / 100) * 0.4;
+  const age = ageDays(asOf, p.listed_at);
+  const ageUsed = age ?? 365;
+  const maturityMult = 0.85 + (clamp(ageUsed, 0, 1095) / 1095) * 0.15;
+  const breadthMult = 1 + Math.min(Math.max(p.chains.length - 1, 0), 4) * 0.03;
+  return Math.max(1, Math.round(p.tvl_usd * med * growthMult * maturityMult * breadthMult));
+}
+
+/**
+ * Backtest, leave-one-out: every live-token protocol (except exchanges)
+ * is scored as if it recorded no token, with itself removed from the peer
+ * set, and the prediction is compared with its actual market cap. The
+ * band is built from that same peer set's residuals, so the coverage is
+ * honest too. Radar-4's rule is scored in the same loop.
+ */
+export function backtest(snapshot: Snapshot): Backtest {
+  const live = livePeers(snapshot.protocols);
   const absErrs: number[] = [];
   const signedErrs: number[] = [];
+  const r4Abs: number[] = [];
+  const r4Preds: number[] = [];
+  const preds: number[] = [];
+  const actuals: number[] = [];
   let covered = 0;
   for (const p of live) {
     const others = live.filter((q) => q.slug !== p.slug);
-    const sub = peerTable(others);
-    const v = valueProtocol(p, snapshot.as_of, sub);
+    const fit = fitPeers(others);
+    const v = valueProtocol(p, snapshot.as_of, others, fit);
     const actual = p.mcap_usd!;
     absErrs.push(Math.abs(v.implied - actual) / actual);
     signedErrs.push((v.implied - actual) / actual);
     if (v.low <= actual && actual <= v.high) covered++;
+    preds.push(v.implied);
+    actuals.push(actual);
+    const r4 = radar4Value(p, snapshot.as_of, others);
+    r4Preds.push(r4);
+    r4Abs.push(Math.abs(r4 - actual) / actual);
   }
   absErrs.sort((a, b) => a - b);
   signedErrs.sort((a, b) => a - b);
+  r4Abs.sort((a, b) => a - b);
   return {
     n: live.length,
     median_abs_error_pct: Math.round(medianOf(absErrs) * 1000) / 10,
     median_signed_error_pct: Math.round(medianOf(signedErrs) * 1000) / 10,
     band_coverage_pct: live.length === 0 ? 0 : Math.round((covered / live.length) * 1000) / 10,
-    peer_multiple_p25: round4(table.global.p25),
-    peer_multiple_p75: round4(table.global.p75),
-    method: 'Leave-one-out: each live-token protocol scored as if pre-token, its own multiple removed from its peer set, prediction vs actual market cap.',
+    spearman: Math.round(spearman(preds, actuals) * 1000) / 1000,
+    radar4_median_abs_error_pct: Math.round(medianOf(r4Abs) * 1000) / 10,
+    radar4_spearman: Math.round(spearman(r4Preds, actuals) * 1000) / 1000,
+    method: 'Leave-one-out: each live-token protocol scored as if pre-token, itself removed from the peer set, prediction vs actual market cap. Radar-4 scored in the same loop.',
   };
 }
 
 /** The five same-category live peers whose TVL sits closest to the protocol's (log distance). */
-function closestPeers(p: SnapshotProtocol, snapshot: Snapshot): PeerComp[] {
+function closestPeers(p: SnapshotProtocol, byCategory: Map<string, { q: SnapshotProtocol; logTvl: number }[]>): PeerComp[] {
+  const list = byCategory.get(p.category ?? '') ?? [];
   const target = Math.log(Math.max(1, p.tvl_usd));
-  return snapshot.protocols
-    .filter((q) => q.slug !== p.slug && q.category === p.category && peerMultiple(q) !== null)
-    .map((q) => ({ q, d: Math.abs(Math.log(Math.max(1, q.tvl_usd)) - target) }))
+  return list
+    .filter((e) => e.q.slug !== p.slug)
+    .map((e) => ({ q: e.q, d: Math.abs(e.logTvl - target) }))
     .sort((a, b) => a.d - b.d || (a.q.slug < b.q.slug ? -1 : 1))
     .slice(0, 5)
-    .map(({ q }) => ({ slug: q.slug, name: q.name, tvl_usd: q.tvl_usd, mcap_usd: q.mcap_usd, multiple: round4(peerMultiple(q)!) }));
+    .map(({ q }) => ({ slug: q.slug, name: q.name, tvl_usd: q.tvl_usd, mcap_usd: q.mcap_usd, multiple: round4(q.mcap_usd! / q.tvl_usd) }));
+}
+
+/** Live peers grouped by category, each with its log TVL, built once per board. */
+function peersByCategory(snapshot: Snapshot): Map<string, { q: SnapshotProtocol; logTvl: number }[]> {
+  const out = new Map<string, { q: SnapshotProtocol; logTvl: number }[]>();
+  for (const q of snapshot.protocols) {
+    if (peerLogMcap(q) === null) continue;
+    const k = q.category ?? '';
+    let list = out.get(k);
+    if (list === undefined) {
+      list = [];
+      out.set(k, list);
+    }
+    list.push({ q, logTvl: Math.log(Math.max(1, q.tvl_usd)) });
+  }
+  return out;
 }
 
 function chainOf(p: SnapshotProtocol): string {
@@ -430,18 +653,11 @@ export function farmSteps(p: SnapshotProtocol, v: Valuation): string[] {
   return steps.map(step);
 }
 
-/** The board: every watchlist slug, plus the strongest rankable pre-token rows below the floor. */
-export function buildBoard(snapshot: Snapshot, table: { byCategory: Map<string, PeerStats>; global: PeerStats }): BoardRow[] {
-  const index = new Map(snapshot.protocols.map((p) => [p.slug, p]));
-  const chosen = new Map<string, SnapshotProtocol>();
-  for (const slug of snapshot.watchlist) {
-    const p = index.get(slug);
-    if (p !== undefined) chosen.set(slug, p);
-  }
-  const early = snapshot.protocols
-    .filter((p) => !chosen.has(p.slug) && isRankable(p) && p.tvl_usd < snapshot.floor_usd);
-  for (const p of early) chosen.set(p.slug, p);
-  const scored = [...chosen.values()].map((p) => ({ p, v: valueProtocol(p, snapshot.as_of, table) }));
+/** The board: every rankable pre-token protocol in the snapshot, watchlist first by value. */
+export function buildBoard(snapshot: Snapshot, peers: SnapshotProtocol[], fit: Fit): BoardRow[] {
+  const byCat = peersByCategory(snapshot);
+  const chosen = snapshot.protocols.filter((p) => isRankable(p));
+  const scored = chosen.map((p) => ({ p, v: valueProtocol(p, snapshot.as_of, peers, fit) }));
   scored.sort((a, b) => b.v.implied - a.v.implied || b.v.high - a.v.high || (a.p.slug < b.p.slug ? -1 : 1));
   return scored.map((s, i) => ({
     rank: i + 1,
@@ -465,11 +681,13 @@ export function buildBoard(snapshot: Snapshot, table: { byCategory: Map<string, 
     multiple_low: s.v.multipleLow,
     multiple_high: s.v.multipleHigh,
     peer_count: s.v.peerCount,
-    peer_global: s.v.peerGlobal,
-    growth_multiplier: s.v.growthMult,
-    maturity_multiplier: s.v.maturityMult,
-    breadth_multiplier: s.v.breadthMult,
-    peers: closestPeers(s.p, snapshot),
+    group: s.v.group,
+    primary_chain: s.v.chain,
+    group_correction: s.v.groupCorrection,
+    chain_correction: s.v.chainCorrection,
+    slope: s.v.slope,
+    intercept: s.v.intercept,
+    peers: closestPeers(s.p, byCat),
     farm_steps: farmSteps(s.p, s.v),
   }));
 }
@@ -487,7 +705,7 @@ export function liveRows(snapshot: Snapshot): LiveRow[] {
       tvl_usd: p.tvl_usd,
       mcap_usd: p.mcap_usd,
       change_7d: p.change_7d,
-      multiple: peerMultiple(p) === null ? null : round4(peerMultiple(p)!),
+      multiple: peerLogMcap(p) === null ? null : round4(p.mcap_usd! / p.tvl_usd),
     }));
 }
 
@@ -515,8 +733,9 @@ function sectorRows(board: BoardRow[]): SectorRow[] {
 }
 
 export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: RadarData } {
-  const table = peerTable(snapshot.protocols);
-  const board = buildBoard(snapshot, table);
+  const peers = livePeers(snapshot.protocols);
+  const fit = fitPeers(peers);
+  const board = buildBoard(snapshot, peers, fit);
   const live = liveRows(snapshot);
   const early = board.filter((r) => !snapshot.watchlist.includes(r.slug)).length;
   const radar: RadarData = {
@@ -529,7 +748,7 @@ export function buildRadar(snapshot: Snapshot): { board: BoardRow[]; radar: Rada
     board_size: board.length,
     early_size: early,
     live_size: live.length,
-    backtest: backtest(snapshot, table),
+    backtest: backtest(snapshot),
     sectors: sectorRows(board),
     rows: board,
     live,

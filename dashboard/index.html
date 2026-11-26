@@ -2,24 +2,25 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Token Radar — pre-token protocols ranked by implied value</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Token Launch Radar — pre-token protocols, ranked by implied value</title>
 <link rel="stylesheet" href="app.css">
 </head>
 <body>
-<a class="skip" href="#board">Skip to the board</a>
-<header class="top">
-  <div class="brand"><span class="mark">◉</span><div><h1>Token Radar</h1><p>What a pre-token protocol would be worth, priced off its live peers</p></div></div>
-  <nav class="nav">
-    <a href="#/" data-nav="board">Board</a>
-    <a href="#/sectors" data-nav="sectors">Sectors</a>
-    <a href="#/compare" data-nav="compare">Compare</a>
-    <a href="#/live" data-nav="live">Live tokens</a>
-    <a href="#/method" data-nav="method">Method</a>
-  </nav>
+<header>
+<h1>Token Launch Radar</h1>
+<p class="sub">Pre-token protocols ranked by implied launch value, from their own numbers. No names are hard-coded: every row is scored by the same model.</p>
+<p class="meta" id="meta"></p>
+<div class="stats" id="stats"></div>
+<nav id="nav">
+<button data-view="board" class="on">Board</button>
+<button data-view="detail">Detail</button>
+<button data-view="method">Method</button>
+<button data-view="market">Market</button>
+</nav>
 </header>
-<main id="app" tabindex="-1"></main>
-<footer class="foot"><p>Token Radar · built for the make.fun token launch radar · data: DefiLlama snapshot, see Method · “records no token” means the snapshot records none, never that the protocol has none · not investment advice.</p></footer>
+<main id="view"></main>
+<footer>Data: DefiLlama snapshot, TVL ≥ $5m. Implied values are estimates with a wide band, not price targets. See Method for the backtest and the limits.</footer>
 <script src="../data.js"></script>
 <script src="app.js"></script>
 </body>
