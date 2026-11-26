@@ -1,18 +1,26 @@
 <!doctype html>
 <html lang="en">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="description" content="Token Radar radar-3: pre-token protocols ranked by implied value, with a farm plan for each.">
-  <title>Token Radar — pre-token protocols ranked by implied value</title>
-  <link rel="stylesheet" href="app.css">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Token Radar — pre-token protocols ranked by implied value</title>
+<link rel="stylesheet" href="app.css">
 </head>
 <body>
-  <!-- The board mounts here; app.js renders it from data.js. -->
-  <a class="skip" href="#board">Skip to the board</a>
-  <main id="board" tabindex="-1" aria-busy="true"></main>
-  <!-- data.js carries the whole dataset (window.RADAR); app.js renders it. No network. -->
-  <script src="../data.js"></script>
-  <script src="app.js"></script>
+<a class="skip" href="#board">Skip to the board</a>
+<header class="top">
+  <div class="brand"><span class="mark">◉</span><div><h1>Token Radar</h1><p>What a pre-token protocol would be worth, priced off its live peers</p></div></div>
+  <nav class="nav">
+    <a href="#/" data-nav="board">Board</a>
+    <a href="#/sectors" data-nav="sectors">Sectors</a>
+    <a href="#/compare" data-nav="compare">Compare</a>
+    <a href="#/live" data-nav="live">Live tokens</a>
+    <a href="#/method" data-nav="method">Method</a>
+  </nav>
+</header>
+<main id="app" tabindex="-1"></main>
+<footer class="foot"><p>Token Radar · built for the make.fun token launch radar · data: DefiLlama snapshot, see Method · “records no token” means the snapshot records none, never that the protocol has none · not investment advice.</p></footer>
+<script src="../data.js"></script>
+<script src="app.js"></script>
 </body>
 </html>
